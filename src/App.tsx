@@ -86,6 +86,53 @@ function flattenModernColors(root: HTMLElement): () => void {
   };
 }
 
+/**
+ * Converts every <img> inside `root` to a safe base64 PNG data URI by drawing
+ * it through an off-screen <canvas>. This is necessary because:
+ *  - SVG data URIs with special characters can fail html2canvas's image decoder
+ *  - JPEG/PNG images uploaded by the user may have CORS issues on some browsers
+ *  - referrerPolicy="no-referrer" on img tags can interfere with canvas tainting
+ *
+ * We replace src in-place and restore afterward via the returned cleanup fn.
+ */
+async function sanitizeImagesForCanvas(root: HTMLElement): Promise<() => void> {
+  const imgs = Array.from(root.querySelectorAll('img')) as HTMLImageElement[];
+  const origSrcs: string[] = [];
+
+  await Promise.all(
+    imgs.map(async (img, i) => {
+      origSrcs[i] = img.src;
+      try {
+        // Draw the already-loaded image into a canvas to get a clean PNG data URI
+        const canvas = document.createElement('canvas');
+        // Wait for the image to be fully decoded if it isn't yet
+        if (!img.complete || img.naturalWidth === 0) {
+          await new Promise<void>((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = () => reject(new Error(`Image failed to load: ${img.src.slice(0, 60)}`));
+          });
+        }
+        canvas.width = img.naturalWidth || 200;
+        canvas.height = img.naturalHeight || 200;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0);
+          img.src = canvas.toDataURL('image/png');
+        }
+      } catch {
+        // If conversion fails, leave the original src — don't break the whole render
+        origSrcs[i] = img.src;
+      }
+    })
+  );
+
+  return () => {
+    imgs.forEach((img, i) => {
+      img.src = origSrcs[i];
+    });
+  };
+}
+
 // Default mock profiles for first use
 const INITIAL_CLIENTS: ClientProfile[] = [
   {
@@ -375,12 +422,17 @@ export default function App() {
       // getComputedStyle resolves these natively; we stamp the result as
       // inline styles so html2canvas only ever sees plain rgb/rgba values.
       const restoreColors = flattenModernColors(element);
+
+      // Pre-convert all <img> tags inside the printable area to safe base64 PNGs.
+      // This handles cases where an uploaded logo (JPEG/PNG data URI) or an SVG
+      // data URI might cause html2canvas to taint the canvas or fail to decode.
+      const restoreImages = await sanitizeImagesForCanvas(element);
       
       // Render to canvas
       const canvas = await html2canvas(element, {
         scale: 2, // Double resolution for ultra-sharp vectors and text
         useCORS: true,
-        allowTaint: false, // DO NOT allow taint! Tainted canvases throw SecurityError on toDataURL
+        allowTaint: false,
         backgroundColor: '#ffffff',
         logging: false,
         onclone: (_doc: Document, clonedEl: HTMLElement) => {
@@ -389,8 +441,9 @@ export default function App() {
         }
       });
 
-      // Restore original inline styles and element style
+      // Restore original inline styles, image srcs, and element style
       restoreColors();
+      restoreImages();
       element.style.cssText = originalStyle;
 
       // 3. Map Canvas to A4 dimensions
