@@ -35,55 +35,55 @@ import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 
 /**
- * Tailwind v4 uses `color-mix(in oklab, ...)` and `oklab()`/`oklch()` for
- * opacity-modifier utilities (e.g. bg-gray-100/70). html2canvas cannot parse
- * these modern color functions, causing a hard crash during PDF generation.
+ * Tailwind v4 generates `color-mix(in oklab, ...)`, `oklab()`, and `oklch()`
+ * for opacity-modifier utilities (e.g. bg-gray-100/70, border-gray-200/50).
+ * html2canvas cannot parse these modern color functions and crashes.
  *
- * This utility resolves every computed style on every element inside the target
- * node by forcing the browser to evaluate the color via a temporary off-screen
- * element (which understands oklab/oklch natively), then replaces the value
- * with a plain rgba() string that html2canvas can understand.
+ * Strategy: walk the LIVE element tree BEFORE html2canvas clones it.
+ * For each element, read its fully-resolved computed style (the browser
+ * resolves oklab/oklch/color-mix natively) and stamp the resolved rgb/rgba
+ * value as an inline style override. html2canvas then reads plain rgb() values.
+ *
+ * Returns a cleanup function that removes all the inline overrides afterward.
  */
-function resolveModernColors(root: HTMLElement): void {
-  const probe = document.createElement('div');
-  probe.style.position = 'fixed';
-  probe.style.opacity = '0';
-  probe.style.pointerEvents = 'none';
-  document.body.appendChild(probe);
-
-  const colorProps = [
-    'color', 'backgroundColor', 'borderColor',
+function flattenModernColors(root: HTMLElement): () => void {
+  const colorProps: (keyof CSSStyleDeclaration)[] = [
+    'color', 'backgroundColor',
     'borderTopColor', 'borderRightColor', 'borderBottomColor', 'borderLeftColor',
-    'outlineColor', 'boxShadow', 'textDecorationColor', 'fill', 'stroke',
-  ] as const;
+    'outlineColor', 'textDecorationColor',
+  ];
+
+  // Track which elements we mutated so we can restore them
+  const mutations: Array<{ el: HTMLElement; prop: string; before: string }> = [];
 
   const needsResolution = (val: string) =>
     val.includes('oklab') || val.includes('oklch') || val.includes('color-mix');
 
-  const resolveColor = (value: string): string => {
-    if (!needsResolution(value)) return value;
-    probe.style.color = value;
-    const resolved = getComputedStyle(probe).color;
-    probe.style.color = '';
-    // getComputedStyle returns rgb() or rgba() which html2canvas handles fine
-    return resolved || value;
-  };
-
   const walk = (el: HTMLElement) => {
-    const cs = getComputedStyle(el);
+    const cs = window.getComputedStyle(el);
     for (const prop of colorProps) {
-      const val = cs[prop as keyof CSSStyleDeclaration] as string;
-      if (val && needsResolution(val)) {
-        (el.style as unknown as Record<string, string>)[prop] = resolveColor(val);
+      const computed = cs[prop] as string;
+      if (computed && needsResolution(computed)) {
+        const styleProp = prop as string;
+        // Save original inline value (may be empty string)
+        mutations.push({ el, prop: styleProp, before: (el.style as unknown as Record<string, string>)[styleProp] ?? '' });
+        // Stamp the resolved rgb/rgba value — getComputedStyle already resolved it
+        (el.style as unknown as Record<string, string>)[styleProp] = computed;
       }
     }
     for (const child of Array.from(el.children)) {
-      walk(child as HTMLElement);
+      if (child instanceof HTMLElement) walk(child);
     }
   };
 
   walk(root);
-  document.body.removeChild(probe);
+
+  // Return cleanup to restore original inline styles
+  return () => {
+    for (const { el, prop, before } of mutations) {
+      (el.style as unknown as Record<string, string>)[prop] = before;
+    }
+  };
 }
 
 // Default mock profiles for first use
@@ -369,6 +369,12 @@ export default function App() {
       if (document.fonts && typeof document.fonts.ready !== 'undefined') {
         await document.fonts.ready;
       }
+
+      // Flatten all Tailwind v4 oklab/oklch/color-mix values to plain rgb()
+      // on the LIVE element BEFORE html2canvas reads it. The browser's own
+      // getComputedStyle resolves these natively; we stamp the result as
+      // inline styles so html2canvas only ever sees plain rgb/rgba values.
+      const restoreColors = flattenModernColors(element);
       
       // Render to canvas
       const canvas = await html2canvas(element, {
@@ -377,19 +383,14 @@ export default function App() {
         allowTaint: false, // DO NOT allow taint! Tainted canvases throw SecurityError on toDataURL
         backgroundColor: '#ffffff',
         logging: false,
-        // Ignore external font requests — fonts are already loaded via CSS @import.
-        // This prevents html2canvas from making network requests for .woff2 files
-        // which can fail with ERR_CONNECTION_TIMED_OUT in sandboxed environments.
-        onclone: (_doc, clonedEl) => {
+        onclone: (_doc: Document, clonedEl: HTMLElement) => {
           // Set a safe font stack so html2canvas doesn't try to re-fetch .woff2 files
           clonedEl.style.fontFamily = 'Inter, ui-sans-serif, system-ui, sans-serif';
-          // Resolve all Tailwind v4 oklab()/oklch()/color-mix() values to plain rgba()
-          // before html2canvas tries to parse them (it only understands rgb/rgba/hex).
-          resolveModernColors(clonedEl);
         }
       });
 
-      // Restore style
+      // Restore original inline styles and element style
+      restoreColors();
       element.style.cssText = originalStyle;
 
       // 3. Map Canvas to A4 dimensions
