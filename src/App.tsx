@@ -311,6 +311,12 @@ export default function App() {
       // Ensure clean 100% size and sharp rendering for mobile
       element.style.transform = 'none';
       element.style.borderRadius = '0px';
+
+      // Wait for all fonts to finish loading before capturing the canvas.
+      // This avoids blank text and 404 font errors in the output.
+      if (document.fonts && typeof document.fonts.ready !== 'undefined') {
+        await document.fonts.ready;
+      }
       
       // Render to canvas
       const canvas = await html2canvas(element, {
@@ -318,7 +324,13 @@ export default function App() {
         useCORS: true,
         allowTaint: false, // DO NOT allow taint! Tainted canvases throw SecurityError on toDataURL
         backgroundColor: '#ffffff',
-        logging: false
+        logging: false,
+        // Ignore external font requests — fonts are already loaded via CSS @import.
+        // This prevents html2canvas from making network requests for .woff2 files
+        // which can fail with ERR_CONNECTION_TIMED_OUT in sandboxed environments.
+        onclone: (_doc, clonedEl) => {
+          clonedEl.style.fontFamily = 'Inter, ui-sans-serif, system-ui, sans-serif';
+        }
       });
 
       // Restore style
