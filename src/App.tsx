@@ -34,6 +34,58 @@ import { motion, AnimatePresence } from 'motion/react';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 
+/**
+ * Tailwind v4 uses `color-mix(in oklab, ...)` and `oklab()`/`oklch()` for
+ * opacity-modifier utilities (e.g. bg-gray-100/70). html2canvas cannot parse
+ * these modern color functions, causing a hard crash during PDF generation.
+ *
+ * This utility resolves every computed style on every element inside the target
+ * node by forcing the browser to evaluate the color via a temporary off-screen
+ * element (which understands oklab/oklch natively), then replaces the value
+ * with a plain rgba() string that html2canvas can understand.
+ */
+function resolveModernColors(root: HTMLElement): void {
+  const probe = document.createElement('div');
+  probe.style.position = 'fixed';
+  probe.style.opacity = '0';
+  probe.style.pointerEvents = 'none';
+  document.body.appendChild(probe);
+
+  const colorProps = [
+    'color', 'backgroundColor', 'borderColor',
+    'borderTopColor', 'borderRightColor', 'borderBottomColor', 'borderLeftColor',
+    'outlineColor', 'boxShadow', 'textDecorationColor', 'fill', 'stroke',
+  ] as const;
+
+  const needsResolution = (val: string) =>
+    val.includes('oklab') || val.includes('oklch') || val.includes('color-mix');
+
+  const resolveColor = (value: string): string => {
+    if (!needsResolution(value)) return value;
+    probe.style.color = value;
+    const resolved = getComputedStyle(probe).color;
+    probe.style.color = '';
+    // getComputedStyle returns rgb() or rgba() which html2canvas handles fine
+    return resolved || value;
+  };
+
+  const walk = (el: HTMLElement) => {
+    const cs = getComputedStyle(el);
+    for (const prop of colorProps) {
+      const val = cs[prop as keyof CSSStyleDeclaration] as string;
+      if (val && needsResolution(val)) {
+        (el.style as unknown as Record<string, string>)[prop] = resolveColor(val);
+      }
+    }
+    for (const child of Array.from(el.children)) {
+      walk(child as HTMLElement);
+    }
+  };
+
+  walk(root);
+  document.body.removeChild(probe);
+}
+
 // Default mock profiles for first use
 const INITIAL_CLIENTS: ClientProfile[] = [
   {
@@ -329,7 +381,11 @@ export default function App() {
         // This prevents html2canvas from making network requests for .woff2 files
         // which can fail with ERR_CONNECTION_TIMED_OUT in sandboxed environments.
         onclone: (_doc, clonedEl) => {
+          // Set a safe font stack so html2canvas doesn't try to re-fetch .woff2 files
           clonedEl.style.fontFamily = 'Inter, ui-sans-serif, system-ui, sans-serif';
+          // Resolve all Tailwind v4 oklab()/oklch()/color-mix() values to plain rgba()
+          // before html2canvas tries to parse them (it only understands rgb/rgba/hex).
+          resolveModernColors(clonedEl);
         }
       });
 
