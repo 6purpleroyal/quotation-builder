@@ -1,0 +1,6 @@
+{
+  "name": "Quotation Builder",
+  "description": "An elegant, mobile-first quotation builder for freelancers to generate and download professional branded PDF estimates with client profiles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
