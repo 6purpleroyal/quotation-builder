@@ -283,17 +283,29 @@ export default function App() {
 
   // Download PDF Renderer using html2canvas & jsPDF
   const handleDownloadPdf = async () => {
-    const element = document.getElementById('quote-printable-area');
-    if (!element) {
-      showToast('Error: Preview element not loaded.', 'error');
-      return;
-    }
+    const previousTab = activeTab;
+    const previousMobileView = mobileView;
+    let revertedToEditor = false;
 
     setIsGeneratingPdf(true);
     showToast('Compiling custom branded styles into PDF...', 'info');
 
     try {
-      // 1. Temporarily override scroll / style scaling issues
+      // 1. Ensure the element is mounted in the DOM and visible (not display: none or unmounted due to tab or mobile view)
+      if (activeTab !== 'builder' || mobileView !== 'preview') {
+        setActiveTab('builder');
+        setMobileView('preview');
+        revertedToEditor = true;
+        // Allow a brief reflow and mount delay
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      }
+
+      const element = document.getElementById('quote-printable-area');
+      if (!element) {
+        throw new Error('Preview element not loaded in DOM.');
+      }
+
+      // 2. Temporarily override scroll / style scaling issues
       const originalStyle = element.style.cssText;
       
       // Ensure clean 100% size and sharp rendering for mobile
@@ -304,7 +316,7 @@ export default function App() {
       const canvas = await html2canvas(element, {
         scale: 2, // Double resolution for ultra-sharp vectors and text
         useCORS: true,
-        allowTaint: true,
+        allowTaint: false, // DO NOT allow taint! Tainted canvases throw SecurityError on toDataURL
         backgroundColor: '#ffffff',
         logging: false
       });
@@ -312,8 +324,8 @@ export default function App() {
       // Restore style
       element.style.cssText = originalStyle;
 
-      // 2. Map Canvas to A4 dimensions
-      const imgData = canvas.toDataURL('image/jpeg', 0.98);
+      // 3. Map Canvas to A4 dimensions
+      const imgData = canvas.toDataURL('image/jpeg', 0.95);
       const pdf = new jsPDF({
         orientation: 'portrait',
         unit: 'mm',
@@ -340,9 +352,14 @@ export default function App() {
       showToast('PDF downloaded successfully!', 'success');
     } catch (err) {
       console.error('PDF Generation Failure:', err);
-      showToast('Failed to build PDF. Please try again.', 'error');
+      showToast('Could not download PDF. If you are on a phone or preview iframe, try tapping the Print icon instead to save as PDF!', 'error');
     } finally {
       setIsGeneratingPdf(false);
+      // Restore previous user navigation context
+      if (revertedToEditor) {
+        setActiveTab(previousTab);
+        setMobileView(previousMobileView);
+      }
     }
   };
 
